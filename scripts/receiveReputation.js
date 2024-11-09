@@ -1,51 +1,81 @@
+const hre = require("hardhat");
 const { ethers } = require("hardhat");
+require("dotenv").config();
 
 async function main() {
-  const reputationReceiverETHAddress = "0x..."; // Replace with the deployed ReputationReceiverETH contract address
-  const reputationReceiverBSCAddress = "0x..."; // Replace with the deployed ReputationReceiverBSC contract address
+    console.log("Starting reputation reception verification...");
 
-  const ReputationReceiverETH = await ethers.getContractFactory("ReputationReceiverETH");
-  const reputationReceiverETH = ReputationReceiverETH.attach(reputationReceiverETHAddress);
+    try {
+        // Get message ID from command line or environment
+        const messageId = process.env.MESSAGE_ID || process.argv[2];
+        if (!messageId) {
+            throw new Error("MESSAGE_ID is required!");
+        }
 
-  const ReputationReceiverBSC = await ethers.getContractFactory("ReputationReceiverBSC");
-  const reputationReceiverBSC = ReputationReceiverBSC.attach(reputationReceiverBSCAddress);
+        // Determine network and load appropriate config
+        const network = process.env.NETWORK || "sepolia"; // or "bsc"
+        const networkConfig = require(`../config/${network}Config.js`);
+        
+        // Load deployment info based on network
+        const receiverContractAddress = network === "sepolia" 
+            ? require("./deployments/receiverETH.json").receiverETH
+            : require("./deployments/receiverBSC.json").receiverBSC;
 
-  console.log("Listening for cross-chain reputation transfers...");
+        // Get signer
+        const [receiver] = await ethers.getSigners();
+        console.log("Checking from account:", receiver.address);
+        
+        // Get contract instance based on network
+        const ReceiverContract = await ethers.getContractFactory(
+            network === "sepolia" ? "ReputationReceiverETH" : "ReputationReceiverBSC"
+        );
+        const receiverContract = ReceiverContract.attach(receiverContractAddress);
 
-  reputationReceiverETH.on("CCIPReceived", async (srcChainId, srcAddress, dstAddress, nonce, payload) => {
-    console.log("Received cross-chain transfer on Ethereum Sepolia:");
-    console.log("Source Chain ID:", srcChainId);
-    console.log("Source Address:", srcAddress);
-    console.log("Destination Address:", dstAddress);
-    console.log("Nonce:", nonce);
-    console.log("Payload:", payload);
+        // Check if message was processed
+        const isProcessed = await receiverContract.isMessageProcessed(messageId);
+        console.log(`Message processed: ${isProcessed}`);
 
-    const tx = await reputationReceiverETH.ccipReceive(srcChainId, srcAddress, dstAddress, nonce, payload);
-    await tx.wait();
+        if (isProcessed) {
+            const fs = require("fs");
+            const transferPath = `./transfers/${network}_${messageId}.json`;
+            
+            if (!fs.existsSync(transferPath)) {
+                console.log("Transfer details not found. This might be a new transfer.");
+                return;
+            }
+            
+            try {
+                const transferInfo = JSON.parse(fs.readFileSync(transferPath));
 
-    console.log("Reputation tokens minted on Ethereum Sepolia");
-  });
+                console.log("\nTransfer Details:");
+                console.log("Sender:", transferInfo.sender);
+                console.log("Receiver:", transferInfo.receiver);
+                console.log("Amount:", ethers.utils.formatEther(transferInfo.amount));
+                console.log("Timestamp:", transferInfo.timestamp);
+                
+                // Get receiver's current balance
+                const balance = await receiverContract.balanceOf(transferInfo.receiver);
+                console.log("\nCurrent receiver balance:", ethers.utils.formatEther(balance));
+            } catch (error) {
+                console.error("Error reading transfer file:", error);
+                return;
+            }
+        } else {
+            console.log("\nMessage has not been processed yet.");
+            console.log("Please wait for CCIP message to be delivered.");
+            console.log("You can check CCIP Explorer for message status.");
+        }
 
-  reputationReceiverBSC.on("CCIPReceived", async (srcChainId, srcAddress, dstAddress, nonce, payload) => {
-    console.log("Received cross-chain transfer on BSC Testnet:");
-    console.log("Source Chain ID:", srcChainId);
-    console.log("Source Address:", srcAddress);
-    console.log("Destination Address:", dstAddress);
-    console.log("Nonce:", nonce);
-    console.log("Payload:", payload);
-
-    const tx = await reputationReceiverBSC.ccipReceive(srcChainId, srcAddress, dstAddress, nonce, payload);
-    await tx.wait();
-
-    console.log("Reputation tokens minted on BSC Testnet");
-  });
+    } catch (error) {
+        console.error("Error during reception verification:", error);
+        if (error.reason) console.error("Reason:", error.reason);
+        process.exit(1);
+    }
 }
 
 main()
-  .then(() => {
-    console.log("Listening for cross-chain transfers...");
-  })
-  .catch((error) => {
-    console.error(error);
-    process.exit(1);
-  });
+    .then(() => process.exit(0))
+    .catch((error) => {
+        console.error(error);
+        process.exit(1);
+    });

@@ -1,28 +1,40 @@
+require("@nomiclabs/hardhat-ethers");
+require("@nomiclabs/hardhat-etherscan");
+require("dotenv").config();
+
 module.exports = {
-    chainlinkNodeUrls: {
-      zkSyncTestnet: "https://zksync2-testnet.zksync.dev",
-      sepoliaTestnet: "https://rpc.sepolia.org",
-      bscTestnet: "https://data-seed-prebsc-1-s1.binance.org:8545",
+    networks: {
+        zkSepolia: {
+            url: process.env.ZKSYNC_SEPOLIA_RPC_URL,
+            accounts: [process.env.PRIVATE_KEY],
+            chainId: 300,
+            verifyURL: process.env.ZKSYNC_VERIFY_URL
+        },
+        sepolia: {
+            url: process.env.SEPOLIA_RPC_URL,
+            accounts: [process.env.PRIVATE_KEY],
+            chainId: 11155111
+        },
+        bscTestnet: {
+            url: process.env.BSC_TESTNET_RPC_URL,
+            accounts: [process.env.PRIVATE_KEY],
+            chainId: 97
+        }
     },
-    apiKeys: {
-      zkSyncTestnet: process.env.ZKSYNC_API_KEY,
-      sepoliaTestnet: process.env.SEPOLIA_API_KEY,
-      bscTestnet: process.env.BSC_API_KEY,
+    etherscan: {
+        apiKey: {
+            zkSepolia: process.env.ZKSCAN_API_KEY,
+            sepolia: process.env.ETHERSCAN_API_KEY,
+            bscTestnet: process.env.BSCSCAN_API_KEY
+        }
     },
-    contracts: {
-      reputationToken: {
-        zkSyncTestnet: "0x...",
-        sepoliaTestnet: "0x...",
-        bscTestnet: "0x...",
-      },
-      reputationSender: {
-        zkSyncTestnet: "0x...",
-      },
-      reputationReceiverETH: {
-        sepoliaTestnet: "0x...",
-      },
-      reputationReceiverBSC: {
-        bscTestnet: "0x...",
-      },
-    },
-  };
+    solidity: {
+        version: "0.8.19",
+        settings: {
+            optimizer: {
+                enabled: true,
+                runs: 200
+            }
+        }
+    }
+};
