@@ -1,0 +1,30 @@
+{
+    "name": "reputation-system",
+    "version": "1.0.0",
+    "description": "Cross-chain reputation system",
+    "scripts": {
+        "compile": "hardhat compile",
+        "test": "hardhat test",
+        "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
+        "deploy:bsc": "hardhat run scripts/deploy.js --network bscTestnet",
+        "deploy:zksync": "hardhat run scripts/deploy.js --network zkSyncTestnet",
+        "verify:sepolia": "hardhat verify --network sepolia",
+        "verify:bsc": "hardhat verify --network bscTestnet"
+    },
+    "dependencies": {
+        "@chainlink/contracts": "^0.8.0",
+        "@openzeppelin/contracts": "^4.9.0",
+        "@openzeppelin/contracts-upgradeable": "^4.9.0"
+    },
+    "devDependencies": {
+        "@matterlabs/hardhat-zksync-deploy": "^0.6.6",
+        "@matterlabs/hardhat-zksync-solc": "^0.4.2",
+        "@nomicfoundation/hardhat-toolbox": "^2.0.2",
+        "@nomiclabs/hardhat-ethers": "^2.2.3",
+        "@nomiclabs/hardhat-etherscan": "^3.1.7",
+        "@openzeppelin/hardhat-upgrades": "^1.28.0",
+        "dotenv": "^16.4.5",
+        "ethers": "^5.7.2",
+        "hardhat": "^2.22.15"
+    }
+}

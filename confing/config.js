@@ -1,40 +1,30 @@
-require("@nomiclabs/hardhat-ethers");
-require("@nomiclabs/hardhat-etherscan");
-require("dotenv").config();
+const { ethers } = require("ethers");
+
+const maxMintAmount = "1000000000000000000000000"; // 1M tokens
+const decayFactor = 100;
+const minReputationScore = "10000000000000000000"; // 10 tokens
 
 module.exports = {
-    networks: {
-        zkSepolia: {
-            url: process.env.ZKSYNC_SEPOLIA_RPC_URL,
-            accounts: [process.env.PRIVATE_KEY],
-            chainId: 300,
-            verifyURL: process.env.ZKSYNC_VERIFY_URL
-        },
-        sepolia: {
-            url: process.env.SEPOLIA_RPC_URL,
-            accounts: [process.env.PRIVATE_KEY],
-            chainId: 11155111
-        },
-        bscTestnet: {
-            url: process.env.BSC_TESTNET_RPC_URL,
-            accounts: [process.env.PRIVATE_KEY],
-            chainId: 97
+    common: {
+        reputationParams: {
+            maxMintAmount,
+            decayFactor,
+            minReputationScore
         }
     },
-    etherscan: {
-        apiKey: {
-            zkSepolia: process.env.ZKSCAN_API_KEY,
-            sepolia: process.env.ETHERSCAN_API_KEY,
-            bscTestnet: process.env.BSCSCAN_API_KEY
-        }
+    chainSelectors: {
+        sepolia: "16015286601757825753",
+        bscTestnet: "13264668187771770619",
+        zksync: "12532609583862916517"
     },
-    solidity: {
-        version: "0.8.19",
-        settings: {
-            optimizer: {
-                enabled: true,
-                runs: 200
-            }
+    addresses: {
+        linkToken: {
+            sepolia: "0x779877A7B0D9E8603169DdbD7836e478b4624789",
+            bscTestnet: "0x84b9B910527Ad5C03A9Ca831909E21e236EA7b06"
+        },
+        ccipRouter: {
+            sepolia: "0x0BF3dE8c5D3e8A2B34D2BEeB17ABfCeBaf363A59",
+            bscTestnet: "0x9527E2d01A3064ef6b50c1Da1C0cC523803BCDF3"
         }
     }
 };
