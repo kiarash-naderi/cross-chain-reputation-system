@@ -16,34 +16,62 @@ import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 contract ReputationSender is ICCIPSender, Pausable, AccessControl, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
+    // Chain selectors for each network
+    uint64 public constant SEPOLIA_SELECTOR = 16015286601757825753;
+    uint64 public constant BSC_TESTNET_SELECTOR = 13264668187771770619;
+    uint64 public constant ZKSYNC_TESTNET_SELECTOR = 300;
+
     // Roles
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
 
+    // State variables
     IERC20 public reputationToken;
     uint256 public decayFactor;
     uint256 public minReputationScore;
 
+    // Network specific settings
     mapping(uint64 => bool) public authorizedChains;
     mapping(uint64 => address) public feeOracles;
+    mapping(uint64 => uint256) public chainGasLimits;
 
     struct UserActivity {
         uint256 transactionCount;
         uint256 participationLevel;
         uint256 lastActivityTimestamp;
         uint256 reputationScore;
+        mapping(uint64 => uint256) chainTransfers; // Track transfers per chain
     }
 
     mapping(address => UserActivity) public userActivities;
+    mapping(uint64 => uint256) public dailyTransferLimits;
 
     // Events
-    event ReputationSent(address indexed from, address indexed to, uint256 amount, uint64 dstChainId, address dstContract);
-    event UserActivityRecorded(address indexed user, uint256 participationLevel, uint256 reputationScore);
-    event ChainAuthorized(uint64 chainId);
-    event ChainUnauthorized(uint64 chainId);
+    event ReputationSent(
+        address indexed from, 
+        address indexed to, 
+        uint256 amount, 
+        uint64 indexed dstChainId, 
+        address dstContract,
+        string networkName
+    );
+    event UserActivityRecorded(
+        address indexed user, 
+        uint256 participationLevel, 
+        uint256 reputationScore,
+        string networkName
+    );
+    event ChainAuthorized(uint64 chainId, string networkName);
+    event ChainUnauthorized(uint64 chainId, string networkName);
     event FeeOracleUpdated(uint64 chainId, address oracleAddress);
-    event MinReputationScoreUpdated(uint256 minScore);
-    event DecayFactorUpdated(uint256 newFactor);
+    event ChainGasLimitUpdated(uint64 chainId, uint256 gasLimit);
+    event DailyLimitUpdated(uint64 chainId, uint256 limit);
+    event NetworkSpecificEvent(
+        uint64 indexed chainId,
+        string networkName,
+        uint256 gasLimit,
+        uint256 estimatedFee
+    );
 
     // Custom errors
     error InvalidDestinationAddress();
@@ -52,13 +80,11 @@ contract ReputationSender is ICCIPSender, Pausable, AccessControl, ReentrancyGua
     error InsufficientReputationScore();
     error InvalidFeeAmount();
     error UnauthorizedCaller();
+    error InvalidChainSelector();
+    error InvalidGasLimit();
+    error DailyLimitExceeded();
+    error InvalidNetworkParameters();
 
-    /**
-     * @dev Constructor function.
-     * @param _reputationTokenAddress The address of the reputation token contract.
-     * @param _decayFactor The initial decay factor for reputation score.
-     * @param _minReputationScore The minimum reputation score required for sending tokens.
-     */
     constructor(
         address _reputationTokenAddress, 
         uint256 _decayFactor, 
@@ -72,6 +98,16 @@ contract ReputationSender is ICCIPSender, Pausable, AccessControl, ReentrancyGua
         _setupRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _setupRole(ADMIN_ROLE, msg.sender);
         _setupRole(OPERATOR_ROLE, msg.sender);
+
+        // Initialize network parameters
+        chainGasLimits[SEPOLIA_SELECTOR] = 200000;
+        chainGasLimits[BSC_TESTNET_SELECTOR] = 150000;
+        chainGasLimits[ZKSYNC_TESTNET_SELECTOR] = 100000;
+
+        // Set default daily limits
+        dailyTransferLimits[SEPOLIA_SELECTOR] = 1000 * 10**18;
+        dailyTransferLimits[BSC_TESTNET_SELECTOR] = 1000 * 10**18;
+        dailyTransferLimits[ZKSYNC_TESTNET_SELECTOR] = 1000 * 10**18;
     }
 
     modifier onlyAuthorized() {
@@ -81,50 +117,99 @@ contract ReputationSender is ICCIPSender, Pausable, AccessControl, ReentrancyGua
         _;
     }
 
+    modifier validChainSelector(uint64 chainId) {
+        if (chainId != SEPOLIA_SELECTOR && 
+            chainId != BSC_TESTNET_SELECTOR && 
+            chainId != ZKSYNC_TESTNET_SELECTOR) {
+            revert InvalidChainSelector();
+        }
+        _;
+    }
+
     /**
-     * @dev Sends reputation tokens to a destination chain and contract.
+     * @dev Sends reputation tokens cross-chain
      */
     function sendReputation(
         address _to,
         uint256 _amount,
         uint64 _dstChainId,
         address _dstContract
-    ) external payable nonReentrant whenNotPaused {
+    ) external payable nonReentrant whenNotPaused validChainSelector(_dstChainId) {
         // Input validation
         if (_to == address(0)) revert InvalidDestinationAddress();
         if (!authorizedChains[_dstChainId]) revert UnauthorizedChain();
         if (reputationToken.balanceOf(msg.sender) < _amount) revert InsufficientBalance();
 
-        // Check reputation score with decay
-        uint256 currentScore = calculateReputationScore(msg.sender);
-        if (currentScore < minReputationScore) revert InsufficientReputationScore();
+        // Check daily limits
+        UserActivity storage activity = userActivities[msg.sender];
+        uint256 todayTransfers = activity.chainTransfers[_dstChainId];
+        if (todayTransfers + _amount > dailyTransferLimits[_dstChainId]) {
+            revert DailyLimitExceeded();
+        }
+
+        // Get network specific gas limit
+        uint256 gasLimit = chainGasLimits[_dstChainId];
+        if (gasLimit == 0) revert InvalidGasLimit();
 
         // Calculate fees
         bytes memory payload = abi.encode(_to, _amount);
         uint256 fee = estimateFee(_dstChainId, _dstContract, payload);
         if (msg.value < fee) revert InvalidFeeAmount();
 
-        // Record user activity and update reputation
-        recordUserActivity(msg.sender, _amount);
+        // Update state
+        activity.chainTransfers[_dstChainId] += _amount;
+        recordUserActivity(msg.sender, _amount, _dstChainId);
 
-        // Transfer tokens using SafeERC20
+        // Transfer tokens
         reputationToken.safeTransferFrom(msg.sender, address(this), _amount);
 
-        // Emit CCIP events
-        emitCCIPSendRequested(
-            _dstChainId,
+        // Emit CCIP and custom events
+        emitCCIPSendRequested(_dstChainId, _dstContract, payload, msg.sender);
+        
+        emit ReputationSent(
+            msg.sender, 
+            _to, 
+            _amount, 
+            _dstChainId, 
             _dstContract,
-            payload,
-            msg.sender
+            _getNetworkName(_dstChainId)
         );
 
-        emit ReputationSent(msg.sender, _to, _amount, _dstChainId, _dstContract);
+        emit NetworkSpecificEvent(
+            _dstChainId,
+            _getNetworkName(_dstChainId),
+            gasLimit,
+            fee
+        );
     }
 
-    /**
-     * @dev Records and updates user activity and reputation.
-     */
-    function recordUserActivity(address user, uint256 participationLevel) internal {
+    function estimateFee(
+        uint64 _dstChainId, 
+        address _dstContract, 
+        bytes memory _payload
+    ) public view validChainSelector(_dstChainId) returns (uint256 fee) {
+        address feeOracle = feeOracles[_dstChainId];
+        
+        if (feeOracle != address(0)) {
+            AggregatorV3Interface oracle = AggregatorV3Interface(feeOracle);
+            (, int256 feeRate,,,) = oracle.latestRoundData();
+            fee = uint256(feeRate) * _payload.length;
+        } else {
+            if (_dstChainId == SEPOLIA_SELECTOR) {
+                fee = 0.01 ether + (_payload.length * 100);
+            } else if (_dstChainId == BSC_TESTNET_SELECTOR) {
+                fee = 0.005 ether + (_payload.length * 50);
+            } else if (_dstChainId == ZKSYNC_TESTNET_SELECTOR) {
+                fee = 0.001 ether + (_payload.length * 30);
+            }
+        }
+    }
+
+    function recordUserActivity(
+        address user, 
+        uint256 participationLevel, 
+        uint64 chainId
+    ) internal {
         UserActivity storage activity = userActivities[user];
         
         unchecked {
@@ -134,16 +219,17 @@ contract ReputationSender is ICCIPSender, Pausable, AccessControl, ReentrancyGua
         activity.participationLevel = participationLevel;
         activity.lastActivityTimestamp = block.timestamp;
         
-        // Calculate and store new reputation score
         uint256 newScore = calculateReputationScore(user);
         activity.reputationScore = newScore;
 
-        emit UserActivityRecorded(user, participationLevel, newScore);
+        emit UserActivityRecorded(
+            user, 
+            participationLevel, 
+            newScore,
+            _getNetworkName(chainId)
+        );
     }
 
-    /**
-     * @dev Calculates reputation score with decay factor.
-     */
     function calculateReputationScore(address user) public view returns (uint256) {
         UserActivity storage activity = userActivities[user];
 
@@ -152,46 +238,16 @@ contract ReputationSender is ICCIPSender, Pausable, AccessControl, ReentrancyGua
         }
 
         unchecked {
-            uint256 transactionCountScore = activity.transactionCount * 10;
-            uint256 participationLevelScore = activity.participationLevel * 20;
+            uint256 baseScore = activity.transactionCount * 10 + 
+                              activity.participationLevel * 20;
+            
             uint256 timeSinceLastActivity = block.timestamp - activity.lastActivityTimestamp;
             uint256 decayAmount = (timeSinceLastActivity * decayFactor) / 1 days;
 
-            uint256 baseScore = transactionCountScore + participationLevelScore;
             return baseScore > decayAmount ? baseScore - decayAmount : 0;
         }
     }
 
-    /**
-     * @dev Estimates the fee for cross-chain message.
-     */
-    function estimateFee(
-        uint64 _dstChainId, 
-        address _dstContract, 
-        bytes memory _payload
-    ) public view returns (uint256 fee) {
-        address feeOracle = feeOracles[_dstChainId];
-        
-        if (feeOracle != address(0)) {
-            // Use oracle for fee calculation
-            AggregatorV3Interface oracle = AggregatorV3Interface(feeOracle);
-            (, int256 feeRate,,,) = oracle.latestRoundData();
-            fee = uint256(feeRate) * _payload.length;
-        } else {
-            // Default fee calculation
-            if (_dstChainId == 1) { // Ethereum Mainnet
-                fee = 0.01 ether + (_payload.length * 100);
-            } else if (_dstChainId == 56) { // BSC
-                fee = 0.005 ether + (_payload.length * 50);
-            } else {
-                fee = 0.001 ether + (_payload.length * 10);
-            }
-        }
-    }
-
-    /**
-     * @dev Emits CCIP send request event.
-     */
     function emitCCIPSendRequested(
         uint64 _dstChainId,
         address _dstContract,
@@ -210,31 +266,39 @@ contract ReputationSender is ICCIPSender, Pausable, AccessControl, ReentrancyGua
         );
     }
 
-    // Admin functions with role-based access control
-    
-    function authorizeChain(uint64 _chainId) external onlyRole(ADMIN_ROLE) {
+    // Admin functions
+    function updateChainGasLimit(
+        uint64 _chainId, 
+        uint256 _gasLimit
+    ) external onlyRole(ADMIN_ROLE) validChainSelector(_chainId) {
+        chainGasLimits[_chainId] = _gasLimit;
+        emit ChainGasLimitUpdated(_chainId, _gasLimit);
+    }
+
+    function updateDailyLimit(
+        uint64 _chainId, 
+        uint256 _limit
+    ) external onlyRole(ADMIN_ROLE) validChainSelector(_chainId) {
+        dailyTransferLimits[_chainId] = _limit;
+        emit DailyLimitUpdated(_chainId, _limit);
+    }
+
+    function authorizeChain(uint64 _chainId) external onlyRole(ADMIN_ROLE) validChainSelector(_chainId) {
         authorizedChains[_chainId] = true;
-        emit ChainAuthorized(_chainId);
+        emit ChainAuthorized(_chainId, _getNetworkName(_chainId));
     }
 
-    function unauthorizeChain(uint64 _chainId) external onlyRole(ADMIN_ROLE) {
+    function unauthorizeChain(uint64 _chainId) external onlyRole(ADMIN_ROLE) validChainSelector(_chainId) {
         authorizedChains[_chainId] = false;
-        emit ChainUnauthorized(_chainId);
+        emit ChainUnauthorized(_chainId, _getNetworkName(_chainId));
     }
 
-    function setFeeOracle(uint64 _chainId, address _oracleAddress) external onlyRole(ADMIN_ROLE) {
+    function setFeeOracle(
+        uint64 _chainId, 
+        address _oracleAddress
+    ) external onlyRole(ADMIN_ROLE) validChainSelector(_chainId) {
         feeOracles[_chainId] = _oracleAddress;
         emit FeeOracleUpdated(_chainId, _oracleAddress);
-    }
-
-    function setMinReputationScore(uint256 _minScore) external onlyRole(ADMIN_ROLE) {
-        minReputationScore = _minScore;
-        emit MinReputationScoreUpdated(_minScore);
-    }
-
-    function setDecayFactor(uint256 _newFactor) external onlyRole(ADMIN_ROLE) {
-        decayFactor = _newFactor;
-        emit DecayFactorUpdated(_newFactor);
     }
 
     function pause() external onlyRole(ADMIN_ROLE) {
@@ -245,9 +309,16 @@ contract ReputationSender is ICCIPSender, Pausable, AccessControl, ReentrancyGua
         _unpause();
     }
 
-    /**
-     * @dev Custom CCIP send function (not implemented).
-     */
+    // Helper functions
+    function _getNetworkName(
+        uint64 chainId
+    ) internal pure returns (string memory) {
+        if (chainId == SEPOLIA_SELECTOR) return "Sepolia";
+        if (chainId == BSC_TESTNET_SELECTOR) return "BSC Testnet";
+        if (chainId == ZKSYNC_TESTNET_SELECTOR) return "zkSync Testnet";
+        return "Unknown";
+    }
+
     function ccipSendCustom(
         uint64 _dstChainId,
         address _dstContract,
@@ -259,20 +330,5 @@ contract ReputationSender is ICCIPSender, Pausable, AccessControl, ReentrancyGua
         revert("Unsupported function");
     }
 
-    /**
-     * @dev Withdraw function for admin to recover stuck tokens
-     */
-    function withdrawToken(
-        address _token,
-        address _to,
-        uint256 _amount
-    ) external onlyRole(ADMIN_ROLE) {
-        require(_token != address(reputationToken), "Cannot withdraw reputation token");
-        IERC20(_token).safeTransfer(_to, _amount);
-    }
-
-    /**
-     * @dev Receive function for handling native token transfers
-     */
     receive() external payable {}
 }
